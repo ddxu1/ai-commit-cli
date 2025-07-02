@@ -76,6 +76,50 @@ class AICommitCLI {
     }
   }
 
+  getModifiedFiles() {
+    try {
+      const files = execSync('git status --porcelain', { encoding: 'utf8' });
+      return files.trim().split('\n')
+        .filter(line => line.length > 0)
+        .map(line => {
+          const status = line.substring(0, 2);
+          const filename = line.substring(3);
+          return { status, filename };
+        })
+        .filter(file => {
+          // Include modified, added, renamed files but exclude deleted and untracked large files
+          const s = file.status;
+          return (s.includes('M') || s.includes('A') || s.includes('R')) && !file.filename.includes('node_modules/');
+        });
+    } catch (error) {
+      return [];
+    }
+  }
+
+  autoStageFiles() {
+    const modifiedFiles = this.getModifiedFiles();
+    if (modifiedFiles.length === 0) {
+      return false;
+    }
+
+    console.log('📁 Found modified files:');
+    modifiedFiles.forEach(file => {
+      const statusIcon = file.status.includes('M') ? '📝' : file.status.includes('A') ? '➕' : '🔄';
+      console.log(`   ${statusIcon} ${file.filename}`);
+    });
+
+    try {
+      modifiedFiles.forEach(file => {
+        execSync(`git add "${file.filename}"`, { stdio: 'ignore' });
+      });
+      console.log(`✅ Staged ${modifiedFiles.length} file(s)\n`);
+      return true;
+    } catch (error) {
+      console.error('❌ Failed to stage files:', error.message);
+      return false;
+    }
+  }
+
   getProjectContext() {
     try {
       // Check for common project files to determine project type
@@ -142,7 +186,7 @@ Respond with ONLY the commit message, no explanation or quotes.`;
     }
   }
 
-  async getUserChoice(message) {
+  async getUserChoice(message, files) {
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout
@@ -151,8 +195,10 @@ Respond with ONLY the commit message, no explanation or quotes.`;
     return new Promise((resolve) => {
       console.log(`\n📝 Suggested commit message:`);
       console.log(`"${message}"`);
+      console.log(`\n📋 Files to be committed:`);
+      files.forEach(file => console.log(`   • ${file}`));
       console.log(`\nOptions:`);
-      console.log(`[a] Accept  [e] Edit  [r] Regenerate  [c] Cancel`);
+      console.log(`[a] Accept & Commit  [e] Edit  [r] Regenerate  [c] Cancel`);
       
       rl.question('Choose an option: ', (choice) => {
         rl.close();
@@ -199,11 +245,16 @@ Respond with ONLY the commit message, no explanation or quotes.`;
       process.exit(1);
     }
 
-    // Check for staged changes
-    const diff = this.getStagedChanges();
+    // Auto-stage modified files if no staged changes exist
+    let diff = this.getStagedChanges();
     if (!diff.trim()) {
-      console.error('❌ No staged changes found. Use "git add" to stage files first.');
-      process.exit(1);
+      console.log('🔍 No staged changes found. Looking for modified files...');
+      const staged = this.autoStageFiles();
+      if (!staged) {
+        console.error('❌ No modified files found to commit.');
+        process.exit(1);
+      }
+      diff = this.getStagedChanges();
     }
 
     const files = this.getFileList();
@@ -216,7 +267,7 @@ Respond with ONLY the commit message, no explanation or quotes.`;
       let commitMessage = await this.generateCommitMessage(diff, files, projectType);
       
       while (true) {
-        const choice = await this.getUserChoice(commitMessage);
+        const choice = await this.getUserChoice(commitMessage, files);
         
         switch (choice) {
           case 'a':
